@@ -31,7 +31,7 @@ The analysis follows three main steps:
 ## Data
 - **Socio-economic variables:** income, population density, unemployment, share of foreigners, sports facilities, local shops.  
 - **Spatial variables:** municipal boundaries (geometry).  
-- All data are available in the `data/` folder (sensitive data anonymized if needed).
+- All data are available in the `data/` folder .
 
 ## Contributors
 - **REN Yue:** Data cleaning, descriptive analysis, visualizations.  
