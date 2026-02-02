@@ -1,0 +1,437 @@
+# =========================================================================
+# PROJET DVF - ÉCONOMÉTRIE SPATIALE 
+# =========================================================================
+
+# ----------------------------
+# 1. INITIALISATION
+# ----------------------------
+rm(list = ls())
+
+library(readr)
+library(dplyr)
+library(sf)
+
+# ----------------------------
+# 2. IMPORTATION DES DONNÉES
+# ----------------------------
+loyer <- read.csv("loyer_m2_commune_2025.csv", sep = ";", skip = 2)
+revenu <- read.csv("revenu_median_commune_2021.csv", sep = ";", skip = 2)
+densite <- read.csv("densite_population_commune_2025.csv", sep = ";", skip = 2)
+chomage <- read.csv("data.csv", sep = ";", skip = 2)      
+data2 <- read.csv("data2_renommee.csv", sep = ",", header = TRUE, stringsAsFactors = FALSE)  
+
+communes_sf <- st_read("commune/communes.shp", quiet = TRUE)
+
+# ----------------------------
+# 3. FONCTION DE NETTOYAGE
+# ----------------------------
+nettoyer_colonne <- function(x) {
+  if(is.character(x)) {
+    x <- trimws(x)
+    x <- gsub(",", ".", x)
+    x[x == "N/A" | x == "" | x == "N/A - résultat non disponible"] <- NA
+  }
+  as.numeric(x)
+}
+
+# ----------------------------
+# 4. CONSTRUCTION DE LA BASE COMPLETE
+# ----------------------------
+base <- data.frame(
+  code_insee = loyer$Code,
+  loyer_m2 = nettoyer_colonne(loyer[,3]),
+  revenu_median = nettoyer_colonne(revenu[,3]),
+  densite_pop = nettoyer_colonne(densite[,3]),
+  tx_chomage = nettoyer_colonne(chomage[,6])
+)
+
+# Nettoyage des colonnes de data2
+cols_to_clean <- setdiff(colnames(data2), "code_insee")
+for(col in cols_to_clean){
+  data2[[col]] <- nettoyer_colonne(data2[[col]])
+}
+
+# Fusion de toutes les données
+base_complete <- base %>%
+  left_join(data2, by = "code_insee")
+
+# ----------------------------
+# 5. NETTOYAGE COMPLET DES NA ET VALEURS ABERRANTES
+# ----------------------------
+cols_fiables <- c("loyer_m2", "revenu_median", "densite_pop", "tx_chomage",
+                  "pct_etrangers", "nb_sport", "nb_commerces")
+
+base_complete_clean <- base_complete %>%
+  filter(complete.cases(.[, cols_fiables])) %>%
+  filter(
+    loyer_m2 > 0,
+    revenu_median > 0,
+    densite_pop >= 0,
+    tx_chomage >= 0,
+    pct_etrangers >= 0,
+    nb_sport >= 0,
+    nb_commerces >= 0
+  )
+
+cat("Nombre d'observations après nettoyage complet :", nrow(base_complete_clean), "\n")
+summary(base_complete_clean)
+
+
+# ----------------------------
+# 6. FUSION AVEC DONNÉES SPATIALES
+# ----------------------------
+
+# Le shapefile utilise "id" comme code INSEE
+communes_sf$code_insee <- as.character(communes_sf$id)
+
+# Fusion avec les données nettoyées (base_complete_clean)
+donnees_spatiales <- communes_sf %>%
+  left_join(base_complete_clean, by = "code_insee")
+
+# Filtrer pour Île-de-France (codes départements 75,77,78,91-95)
+codes_dep_idf <- c("75", "77", "78", "91", "92", "93", "94", "95")
+idf <- donnees_spatiales %>%
+  filter(substr(code_insee, 1, 2) %in% codes_dep_idf) %>%
+  filter(!is.na(loyer_m2))  # on s'assure que le loyer est présent
+
+cat("Communes en Île-de-France avec données complètes :", nrow(idf), "\n")
+
+# ----------------------------
+# 7. ANALYSE EXPLORATOIRE
+# ----------------------------
+
+cat("\n=== ANALYSE DESCRIPTIVE GLOBALE ===\n\n")
+
+cat("\n=== ANALYSE DESCRIPTIVE GLOBALE ===\n\n")
+
+# 1. Variables d'intérêt pour l'étude
+vars_economiques <- c("loyer_m2", "revenu_median", "densite_pop", 
+                      "tx_chomage", "pct_etrangers", "nb_sport", "nb_commerces")
+
+# 2. Statistiques de base par département
+idf$departement <- substr(idf$code_insee, 1, 2)
+
+stats_dep <- idf %>%
+  st_drop_geometry() %>%
+  group_by(departement) %>%
+  # On utilise directement vars_economiques ici pour éviter les colonnes inutiles
+  summarise(across(all_of(vars_economiques), ~mean(.x, na.rm = TRUE))) %>%
+  arrange(desc(loyer_m2))
+
+cat("1. STATISTIQUES MOYENNES PAR DÉPARTEMENT :\n")
+print(stats_dep)
+
+# 3. Matrice de corrélation
+cat("\n2. MATRICE DE CORRÉLATIONS :\n")
+cor_matrix <- idf %>%
+  st_drop_geometry() %>%
+  select(all_of(vars_economiques)) %>%
+  cor(use = "complete.obs")
+
+print(round(cor_matrix, 2))
+
+# 3. Distribution des variables
+for(col in vars_economiques){
+  cat("\nVariable :", col, "\n")
+  
+  # Extraction des données sans NA
+  x <- idf[[col]]
+  x <- x[!is.na(x)]
+  
+  # Calcul des statistiques
+  stats <- summary(x)
+  
+  cat(sprintf("   Min: %.2f | 1er Qu: %.2f | Médiane: %.2f | Moyenne: %.2f | 3e Qu: %.2f | Max: %.2f\n", 
+              stats["Min."], stats["1st Qu."], stats["Median"], 
+              stats["Mean"], stats["3rd Qu."], stats["Max."]))
+}
+
+# 4. Analyse des extrêmes pour le loyer
+cat("\n4. ANALYSE DES EXTRÊMES - LOYER :\n")
+
+# --- HAUT DE GAMME ---
+haut_gamme <- idf %>% filter(loyer_m2 > 25)
+cat("Communes avec loyer > 25€/m² :", nrow(haut_gamme), "\n")
+
+if(nrow(haut_gamme) > 0){
+  cat("Caractéristiques moyennes (Loyer > 25) :\n")
+  # Utilisation de vars_economiques pour éviter les erreurs de calcul
+  stats_haut <- haut_gamme %>% 
+    st_drop_geometry() %>% 
+    select(all_of(vars_economiques)) %>% 
+    colMeans(na.rm = TRUE)
+  print(round(stats_haut, 2))
+}
+
+# --- BAS DE GAMME ---
+bas_gamme <- idf %>% filter(loyer_m2 < 12)
+cat("\nCommunes avec loyer < 12€/m² :", nrow(bas_gamme), "\n")
+
+if(nrow(bas_gamme) > 0){
+  cat("Caractéristiques moyennes (Loyer < 12) :\n")
+  stats_bas <- bas_gamme %>% 
+    st_drop_geometry() %>% 
+    select(all_of(vars_economiques)) %>% 
+    colMeans(na.rm = TRUE)
+  print(round(stats_bas, 2))
+}
+
+# 5. Top 10 communes par loyer
+cat("\n5. TOP 10 COMMUNES PAR LOYER :\n")
+
+# On s'assure de prendre le nom de la commune qui vient du shapefile
+# et les variables économiques que nous avons définies
+top10 <- idf %>%
+  st_drop_geometry() %>%
+  # Remplace 'nom' par le vrai nom de la colonne de ton shapefile (ex: NOM_COM)
+  select(code_insee, any_of(c("nom", "nom_com", "NOM_COM")), all_of(vars_economiques)) %>%
+  arrange(desc(loyer_m2)) %>%
+  head(10)
+
+print(top10)
+
+# =========================================================================
+# 8. CARTES THÉMATIQUES SIMPLES
+# =========================================================================
+
+library(ggplot2)
+library(viridis)
+
+cat("\n=== CRÉATION DES CARTES THÉMATIQUES ===\n\n")
+
+# 1. CARTE DES LOYERS
+cat("1. Carte des loyers...\n")
+carte_loyer <- ggplot(idf) +
+  geom_sf(aes(fill = loyer_m2), color = NA, size = 0.1) +
+  scale_fill_viridis(
+    option = "plasma",
+    name = "€/m²",
+    limits = c(7, 35),
+    breaks = seq(10, 30, by = 5)
+  ) +
+  labs(
+    title = "Loyer moyen au m² par commune",
+    subtitle = "Île-de-France - Données 2025",
+    caption = "Source : Observatoire des Territoires"
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9),
+    legend.position = "right"
+  )
+
+# 2. CARTE DES REVENUS
+cat("2. Carte des revenus...\n")
+carte_revenu <- ggplot(idf) +
+  geom_sf(aes(fill = revenu_median), color = NA, size = 0.1) +
+  scale_fill_viridis(
+    option = "viridis",
+    name = "€",
+    limits = c(15000, 50000),
+    breaks = seq(20000, 45000, by = 5000)
+  ) +
+  labs(
+    title = "Revenu médian par commune",
+    subtitle = "Île-de-France - Données 2021",
+    caption = "Source : Observatoire des Territoires"
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9),
+    legend.position = "right"
+  )
+
+# 3. CARTE DE DENSITÉ
+cat("3. Carte de densité...\n")
+carte_densite <- ggplot(idf) +
+  geom_sf(aes(fill = densite_pop), color = NA, size = 0.1) +
+  scale_fill_viridis(
+    option = "magma",
+    name = "hab/km²",
+    trans = "log10",
+    breaks = c(10, 100, 1000, 10000, 30000)
+  ) +
+  labs(
+    title = "Densité de population par commune",
+    subtitle = "Île-de-France - Données 2025",
+    caption = "Source : Observatoire des Territoires"
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9),
+    legend.position = "right"
+  )
+
+# 4. CARTE DU CHÔMAGE
+cat("4. Carte du chômage...\n")
+carte_chomage <- ggplot(idf) +
+  geom_sf(aes(fill = tx_chomage), color = NA, size = 0.1) +
+  scale_fill_viridis(
+    option = "inferno",
+    name = "%",
+    limits = c(1, 25),
+    breaks = seq(5, 20, by = 5)
+  ) +
+  labs(
+    title = "Taux de chômage par commune",
+    subtitle = "Île-de-France - Données 2025",
+    caption = "Source : Observatoire des Territoires"
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9),
+    legend.position = "right"
+  )
+
+# ----------------------------
+# SAUVEGARDE DES CARTES
+# ----------------------------
+cat("\nSauvegarde des cartes...\n")
+ggsave("carte_loyers_idf.png", carte_loyer, width = 10, height = 8, dpi = 300, bg = "white")
+ggsave("carte_revenus_idf.png", carte_revenu, width = 10, height = 8, dpi = 300, bg = "white")
+ggsave("carte_densite_idf.png", carte_densite, width = 10, height = 8, dpi = 300, bg = "white")
+ggsave("carte_chomage_idf.png", carte_chomage, width = 10, height = 8, dpi = 300, bg = "white")
+
+# ----------------------------
+# AFFICHAGE DES CARTES
+# ----------------------------
+cat("\nAffichage des cartes...\n")
+print(carte_loyer)
+print(carte_revenu)
+print(carte_densite)
+print(carte_chomage)
+
+# =========================================================================
+# 9. MATRICE DE POIDS SPATIAUX
+# =========================================================================
+
+library(spdep)
+
+cat("\n=== CONSTRUCTION DE LA MATRICE DE POIDS SPATIAUX ===\n\n")
+
+# Sécurisation des géométries (évite les géométries invalides qui bloquent kNN)
+idf <- st_make_valid(idf)
+
+# Calcul des centroïdes des communes (nécessaire pour kNN)
+centroids <- st_centroid(idf)
+
+# Extraction des coordonnées
+coords <- st_coordinates(centroids)
+
+# Définition du nombre de voisins (k-plus proches)
+k <- 5
+
+# Construction des voisins k-plus proches
+voisins_knn <- knearneigh(coords, k = k)
+voisins_knn <- knn2nb(voisins_knn)
+
+# Création de la matrice de poids spatiaux (normalisation par ligne)
+W_knn <- nb2listw(voisins_knn, style = "W")
+
+
+# =========================================================================
+# 10. TEST D'AUTOCORRÉLATION SPATIALE (MORAN GLOBAL)
+# =========================================================================
+
+cat("\n=== TEST D'AUTOCORRÉLATION SPATIALE - MORAN GLOBAL ===\n\n")
+
+# Variable d'intérêt : loyer au m²
+y <- idf$loyer_m2
+
+# Test de Moran global
+moran_global <- moran.test(y, W_knn)
+
+print(moran_global)
+# =========================================================================
+# 11. OLS
+# =========================================================================
+cat("\n=== MODÈLE OLS DE RÉFÉRENCE ===\n\n")
+
+# Transformations log (classique en immobilier)
+idf$log_revenu <- log(idf$revenu_median)
+idf$log_densite <- log(idf$densite_pop)
+
+# Modèle OLS
+modele_ols <- lm(
+  loyer_m2 ~ log_revenu + log_densite + tx_chomage +
+    pct_etrangers + nb_sport + nb_commerces,
+  data = idf
+)
+
+summary(modele_ols)
+
+
+# =========================================================================
+# 12. TESTS LAGRANGE MULTIPLIERS 
+# =========================================================================
+
+cat("\n=== TESTS LM POUR DÉPENDANCE SPATIALE ===\n\n")
+
+# Tests LM classiques et robustes
+lm_tests <- lm.LMtests(
+  modele_ols,
+  W_knn,
+  test = c("LMlag", "LMerr", "RLMlag", "RLMerr")
+)
+
+print(lm_tests)
+
+# =========================================================================
+# 13. ESTIMATION SPATIALE : SAR ET SDM
+# =========================================================================
+
+library(spatialreg)
+
+cat("\n=== ESTIMATION DU MODÈLE SAR ===\n\n")
+
+# Modèle SAR
+modele_sar <- lagsarlm(
+  loyer_m2 ~ log_revenu + log_densite + tx_chomage + pct_etrangers + nb_sport + nb_commerces,
+  data = idf,
+  listw = W_knn,
+  method = "eigen"
+)
+
+summary(modele_sar)
+
+# Effets directs et indirects (impacts) pour SAR
+impacts_sar <- impacts(modele_sar, listw = W_knn, R = 1000)  # R=1000 bootstrap pour les IC
+cat("\n=== EFFETS DIRECTS ET INDIRECTS - SAR ===\n")
+print(impacts_sar, short = TRUE)
+
+# ------------------------------------------------------------
+cat("\n=== ESTIMATION DU MODÈLE SDM ===\n\n")
+
+# Modèle SDM (Spatial Durbin Model)
+modele_sdm <- lagsarlm(
+  loyer_m2 ~ log_revenu + log_densite + tx_chomage + pct_etrangers + nb_sport + nb_commerces,
+  data = idf,
+  listw = W_knn,
+  type = "mixed",   # SDM = SAR + variables spatiales explicatives
+  method = "eigen"
+)
+
+summary(modele_sdm)
+
+# Effets directs et indirects (spillovers) pour SDM
+impacts_sdm <- impacts(modele_sdm, listw = W_knn, R = 1000)
+cat("\n=== EFFETS DIRECTS ET INDIRECTS - SDM ===\n")
+print(impacts_sdm, short = TRUE)
+
+
+# # Choix SAR & SDM 
+anova(modele_sdm, modele_sar)
+
+# SDM l'emporte 
